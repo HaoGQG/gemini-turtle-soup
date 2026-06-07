@@ -143,13 +143,13 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-"""     with st.expander("👁️ 開發者除錯後台"):
-        if st.session_state.current_view_game == "✨ 進行中的當前遊戲":
-            st.write(f"當前局答案：{st.session_state.secret_target}")
-        else:
-            st.write(f"正在檢視歷史局：\n{st.session_state.current_view_game}")
-        st.write("---")
-        st.write(f"🚫 已封鎖題目清單：\n{st.session_state.past_targets}") """
+    # with st.expander("👁️ 開發者除錯後台"):
+    #     if st.session_state.current_view_game == "✨ 進行中的當前遊戲":
+    #         st.write(f"當前局答案：{st.session_state.secret_target}")
+    #     else:
+    #         st.write(f"正在檢視歷史局：\n{st.session_state.current_view_game}")
+    #     st.write("---")
+    #     st.write(f"🚫 已封鎖題目清單：\n{st.session_state.past_targets}")
 
 
 # ==========================================
