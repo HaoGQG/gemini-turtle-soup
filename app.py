@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import time  # 用於計算延遲時間與防禦冷卻
+import re    # 新增：用於嚴格清洗 AI 謎底字串
 from datetime import datetime
 from google import genai
 from google.genai import types
@@ -57,7 +58,7 @@ if "current_game_finished" not in st.session_state:
 if "last_submit_time" not in st.session_state:
     st.session_state.last_submit_time = 0.0
 
-# 💡 【核心新增】：用來記錄所有出現過的歷史題目清單 (List)
+# 💡 【核心功能】：歷史封鎖題目清單
 if "past_targets" not in st.session_state:
     st.session_state.past_targets = []
 
@@ -80,14 +81,18 @@ def start_new_game_logic():
         response = client.models.generate_content(
             model='gemini-3.1-flash-lite',
             contents=init_prompt,
-            config=types.GenerateContentConfig(
-                temperature=1.0,  # 保持高隨機性
-            )
+            config=types.GenerateContentConfig(temperature=1.0)
         )
         raw_target = response.text.strip()
         st.session_state.secret_target = raw_target
         
-        clean_name = raw_target.replace("本局目標：", "").replace("『", "").replace("』", "").strip()
+        # 💡 【Bug 1 修復】：使用正則表達式提取純中文/英文名詞，徹底濾除『』、[]、句點與空格
+        match = re.search(r"本局目標：[『「\[]?([\w\s\u4e00-\u9fa5]+)[』」\]]?", raw_target)
+        if match:
+            clean_name = match.group(1).strip()
+        else:
+            clean_name = raw_target.replace("本局目標：", "").replace("『", "").replace("』", "").strip()
+            
         if clean_name and clean_name not in st.session_state.past_targets:
             st.session_state.past_targets.append(clean_name)
             
@@ -109,10 +114,13 @@ if st.session_state.secret_target is None:
 with st.sidebar:
     st.header("🎮 遊戲控制面板")
     
+    # 💡 【Bug 3 修復】：重新梳理按鈕存檔判定，確保成功局與失敗局各就各位、不漏存
     if st.button("🔄 重新開始新遊戲", use_container_width=True, type="primary"):
-        if st.session_state.messages and not st.session_state.current_game_finished:
-            fail_key = f"❌ {st.session_state.game_time_label} ({st.session_state.secret_target}) (失敗)"
-            st.session_state.game_history[fail_key] = st.session_state.messages
+        # 只有當玩家「真正有提問過」才寫入歷史，防止無限洗出空白失敗局
+        if st.session_state.messages:
+            if not st.session_state.current_game_finished:
+                fail_key = f"❌ {st.session_state.game_time_label} ({st.session_state.secret_target}) (失敗)"
+                st.session_state.game_history[fail_key] = st.session_state.messages
             
         start_new_game_logic()
         st.session_state.current_view_game = "✨ 進行中的當前遊戲"
@@ -127,19 +135,12 @@ with st.sidebar:
         st.session_state.current_view_game = "✨ 進行中的當前遊戲"
         
     current_index = options.index(st.session_state.current_view_game)
-        
-    selected_game = st.radio(
-        "選擇要查看的局數：", 
-        options, 
-        index=current_index
-    )
+    selected_game = st.radio("選擇要查看的局數：", options, index=current_index)
     
     if selected_game != st.session_state.current_view_game:
         st.session_state.current_view_game = selected_game
-        
         if selected_game == "✨ 進行中的當前遊戲" and st.session_state.current_game_finished:
             start_new_game_logic()
-            
         st.rerun()
 
     st.markdown("---")
@@ -168,6 +169,7 @@ else:
     else:
         st.error(f"🏳️ 正在查看未完成/放棄紀錄：{st.session_state.current_view_game}")
 
+# 渲染對話方塊
 for message in display_messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -187,13 +189,13 @@ if user_question := st.chat_input(placeholder_text, disabled=is_history_mode):
         
         current_time = time.time()
         
-        # 🔒 【防禦檢查 1】：提問時間間隔是否小於 1 秒
+        # 🔒 【防禦檢查 1】：1 秒提問冷卻
         time_diff = current_time - st.session_state.last_submit_time
         if time_diff < 1.0:
             st.error(f"🛑 系統安全防禦中：請求過於頻繁！提問冷卻時間為 1 秒。請稍候再試。")
             st.stop()
             
-        # 🔒 【防禦檢查 2】：輸入字串長度是否超過 50 個字
+        # 🔒 【防禦檢查 2】：50 字數限制
         if len(user_question) > 50:
             st.error(f"🛑 系統安全防禦中：提問字數不能超過 50 個字！")
             st.stop()
@@ -205,10 +207,11 @@ if user_question := st.chat_input(placeholder_text, disabled=is_history_mode):
         with st.chat_message("user"):
             st.markdown(user_question)
         
-        # 準備 API 參數
-        clean_target = st.session_state.secret_target.replace("本局目標：", "").replace("『", "").replace("』", "").strip()
+        # 提取乾淨的目標名詞
+        match_curr = re.search(r"本局目標：[『「\[]?([\w\s\u4e00-\u9fa5]+)[』」\]]?", st.session_state.secret_target)
+        clean_target = match_curr.group(1).strip() if match_curr else st.session_state.secret_target.replace("本局目標：", "").strip()
         
-        # 🔒 【防禦微調一】：強控 System Instruction 的防禦級別
+        # 準備 API 高壓 System Instruction
         system_instruction = (
             "你是海龜湯（Yes/No Game）的主持人。我（玩家）正在試圖猜出你心中秘密設定的目標物品。\n"
             f"你心中設定的秘密目標是：【{clean_target}】。\n\n"
@@ -224,16 +227,19 @@ if user_question := st.chat_input(placeholder_text, disabled=is_history_mode):
             f"例外：只有當玩家在提問中『真的直接猜中了核心名詞「{clean_target}」』時（例如：「是{clean_target}嗎」），你才必須回答固定字串：『是，恭喜答對！』。"
         )
         
-        # 🔒 【防禦微調二】：參數化封裝對話上下文
+        # 打包並縮減上下文窗口 (僅保留最後兩輪，防範超時 DDoS)
         api_contents = []
-        for msg in st.session_state.messages:
+        context_window = st.session_state.messages[-4:]  
+        for msg in context_window:
             role_mapping = "user" if msg["role"] == "user" else "model"
             
-            # 如果是使用者的輸入，使用明確的 XML 標籤標記與引號包裹，實作數據與命令分離
             if msg["role"] == "user":
-                formatted_content = f"<user_input> \"{msg['content']}\" </user_input>"
+                # 💡 【Bug 2 修復】：精準剝離自訂的計時器後綴，徹底阻止計時文字汙染 AI 智商
+                pure_user_text = msg["content"].split("\n\n⏱️")[0].split("\n\n`⏱️`")[0]
+                formatted_content = f"<user_input> \"{pure_user_text}\" </user_input>"
             else:
-                formatted_content = msg["content"]
+                pure_ai_text = msg["content"].split("\n\n⏱️")[0].split("\n\n`⏱️`")[0]
+                formatted_content = pure_ai_text
                 
             api_contents.append(
                 types.Content(role=role_mapping, parts=[types.Part.from_text(text=formatted_content)])
@@ -251,7 +257,7 @@ if user_question := st.chat_input(placeholder_text, disabled=is_history_mode):
                         contents=api_contents,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.1,  # 保持最低溫度，防止被 prompt 拐走
+                            temperature=0.1,
                         )
                     )
                     
@@ -261,11 +267,11 @@ if user_question := st.chat_input(placeholder_text, disabled=is_history_mode):
                     ai_reply = response.text.strip()
                     
                     # 渲染回答與時間
-                    response_placeholder.markdown(f"{ai_reply}\n\n`⏱️ 系統判定耗時: {elapsed_time:.3f} 秒`")
-                    st.session_state.messages.append({"role": "assistant", "content": f"{ai_reply}\n\n`⏱️ 系統判定耗時: {elapsed_time:.3f} 秒`"})
+                    response_placeholder.markdown(f"{ai_reply}\n\n⏱️ 系統判定耗時: {elapsed_time:.3f} 秒")
+                    st.session_state.messages.append({"role": "assistant", "content": f"{ai_reply}\n\n⏱️ 系統判定耗時: {elapsed_time:.3f} 秒"})
                     
                     if "恭喜答對" in ai_reply:
-                        history_key = f"👑 {st.session_state.game_time_label} ({st.session_state.secret_target}) (成功)"
+                        history_key = f"👑 {st.session_state.game_time_label} ({clean_target}) (成功)"
                         st.session_state.game_history[history_key] = st.session_state.messages
                         st.session_state.current_view_game = history_key
                         st.session_state.current_game_finished = True
